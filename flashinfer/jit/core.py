@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Sequence, Union, Hashable
 
 import tvm_ffi
 from filelock import FileLock
+import torch
 
 from ..compilation_context import CompilationContext
 from . import env as jit_env
@@ -93,6 +94,13 @@ class FlashInferJITLogger(logging.Logger):
 logger = FlashInferJITLogger("flashinfer.jit")
 
 
+def _torch_is_compiling() -> bool:
+    try:
+        return bool(torch.compiler.is_compiling())
+    except Exception:
+        return False
+
+
 def check_cuda_arch():
     # Collect all detected CUDA architectures
     eligible = False
@@ -167,7 +175,10 @@ class JitSpecRegistry:
         """Register a new JitSpec"""
         if spec.name not in self._specs:
             self._specs[spec.name] = spec
-            self._creation_times[spec.name] = datetime.now()
+            # NOTE: Avoid runtime datetime calls here because this path may be
+            # reached while torch.compile/Dynamo is tracing user code.
+            # datetime.now() is not traceable and can hard-fail compilation.
+            self._creation_times[spec.name] = datetime.min
 
     def get_all_specs(self) -> Dict[str, "JitSpec"]:
         """Get all registered JitSpecs"""
@@ -257,10 +268,16 @@ class JitSpec:
 
     @property
     def is_aot(self) -> bool:
+        # Avoid filesystem stat() during Dynamo tracing.
+        if _torch_is_compiling():
+            return False
         return self.aot_path.exists()
 
     @property
     def is_compiled(self) -> bool:
+        # Avoid filesystem stat() during Dynamo tracing.
+        if _torch_is_compiling():
+            return False
         return self.get_library_path().exists()
 
     @property
@@ -283,6 +300,9 @@ class JitSpec:
 
     @property
     def is_ninja_generated(self) -> bool:
+        # Avoid filesystem stat() during Dynamo tracing.
+        if _torch_is_compiling():
+            return False
         return self.ninja_path.exists()
 
     def build(self, verbose: bool, need_lock: bool = True) -> None:
